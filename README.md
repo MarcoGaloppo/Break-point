@@ -26,11 +26,6 @@ This is done because turning correlation on then changes the variance and path s
 **without moving the mean**. Also, note that to try and avoid exiting completely from
 CLT territory we are consider short-time correlations within each game. 
 
-**3. `p` is NOT a constant.** Since `f` is strongly curved, `E[f(p̃)] ≠ f(E[p̃])`. We can then 
-get a measure of the fragility of the p-constant assumption of the initial model by directly 
-measuring `H(p, δ) = ½[f(p+δ) + f(p−δ)] − f(p)` from Taleb, N. N., & Douady, R. (2013) Quantitative 
-Finance, 13(11), 1677–1689.
-
 ## Headline results
 
 1. An order-1 chain (short-term memory), effectively generates excess kurtosis which still decays 
@@ -73,5 +68,8 @@ pip install -r requirements.txt
 - **Random `p` as a first-class feature** — a slow random walk or two-state regime for `p_t`
   within a match (fatigue is a downward drift). This is where genuinely non-vanishing tails
   appear, as opposed to the merely mis-scaled ones.
+- **Long memory**: replace the order-1 chain with a streak-length-dependent boost, where
+  $\rho$ decays slowly enough that $\sum_h \rho_h$ diverges. That is the regime where the
+  CLT genuinely can fail.
 - **Inference, not simulation** — given one observed match, what is the posterior over
   `(p, k)`?
