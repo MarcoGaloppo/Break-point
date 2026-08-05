@@ -3,19 +3,22 @@
 How much do textbook statistics comfortable machinery survives contact with a
 process that has **absorbing barriers**, **serial correlation**, and **parameter uncertainty**? 
 Tennis is a clean (and fun!) place to ask, because the bottom of the process really is a
-Bernoulli trial and everything above it is bookkeeping we control exactly. 
+Bernoulli trial. Additionally, everything above it is bookkeeping that we control exactly. 
+Although finance is messy sometimes is good to start with a ground truth and build up 
+some basic intuition (without being fooled too much by it possibly!)
 
 ## The set-up
 
 Player A wins any point with probability `p`. Under textbook assumptions the number of points
 A wins in `n` points is exactly `Binomial(n, p)` and `p̂` has standard error `√(p(1-p)/n)`.
-Here, three things break that.
+Here, we break this simple scenario in various ways:
 
 **1. Nonlinear aggregation.** Tennis counts games (first to 4, win by 2), sets (first to 6
-games, win by 2, tiebreak at 6–6), and matches (best of 3 or 5). Every layer is an
+games, win by 2, tiebreak at 6–6), and matches (best of 3 or 5). Every layer is an effective
 absorbing-barrier stopping problem, and the composition `f(p) = P(A wins the match)` is a
 steep S-curve. It is trivial to say, but scoring a point and winning a game are not the 
-same thing. **Note, this is present even with perfectly i.i.d. points.**
+same thing. And they do not carry the same probability given a set chance of winning a point.
+**Note, this is present even with perfectly i.i.d. points.**
 
 **2. Serial correlation.** The point-win probability depends on the previous point via
 
@@ -24,16 +27,18 @@ same thing. **Note, this is present even with perfectly i.i.d. points.**
 The offset `c` is solved numerically so the **stationary** win probability stays exactly `p`.
 This is done because turning correlation on then changes the variance and path structure
 **without moving the mean**. Also, note that to try and avoid exiting completely from
-CLT territory we are consider short-time correlations within each game. 
+CLT territory we are consider short-time correlations within each game (at this stage).
 
 ## Headline results
 
 1. An order-1 chain (short-term memory), effectively generates excess kurtosis which still decays 
-to zero. Correlation of this kind does not buy you fat tails — it buys you **overconfidence**, 
-which is more insidious, because every normality test on correctly-standardised residuals will pass 
-while your error bars stay too small. There is more volatility in the system, even in this case.
+to zero. Correlation of this kind does not buy you fat tails — it buys you **overconfidence**. And 
+this is a problem. Because, then, every normality test on correctly-standardised residuals will pass 
+while your error bars stay too small with respect to the actual scenaro you would like to describe. 
+There is more volatility in the system, even in this case. Quite fun!
 
-2. Momentum is a variance pump, and in a barrier-crossing game variance is worth something to whoever is behind. We have an asymettric situation. At p = 0.55 held fixed, the favourite's match-win probability falls from 91% to 77% as k goes from 0 to 1. **A model fitted on point-level data and aggregated under independence systematically overprices favourites.**
+2. Momentum is a variance pump, and in a barrier-crossing game variance is worth something to whoever is behind. 
+We have an asymettric situation in which the (relatively) close-to-win-but-still-losing player benefits more from luck (i.e., more things can go better than worse for them) than the close-to-losing-but-still-winning player (which has a more capped ceiling on good luck than bad luck). At p = 0.55 held fixed, the favourite's match-win probability falls from 91% to 77% as k goes from 0 to 1. **A model fitted on point-level data and aggregated under independence systematically overprices favourites.** If a player is a (slight) underdog, volatility will benefit them more!
 
 ## Files
 
