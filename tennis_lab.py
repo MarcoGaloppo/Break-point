@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
 import numpy as np
+import math
 
 __all__ = [
     "TennisSimulator",
@@ -32,6 +33,10 @@ __all__ = [
     "set_win_probability",
     "match_win_probability_iid",
     "race_win_probability",
+    "run_hazard",
+    "run_survival",
+    "hurst_from_beta",
+    "check_tail_params",
 ]
 
 
@@ -132,6 +137,8 @@ class TennisSimulator:
         self,
         p: float = 0.55,
         k: float = 0.0,
+        beta: float = 2.5,
+        gamma: float = 2.0,
         memory: str = "markov",
         calibrate: bool = True,
         best_of: int = 3,
@@ -144,14 +151,17 @@ class TennisSimulator:
     ) -> None:
         if not 0.0 < p < 1.0:
             raise ValueError("p must lie strictly inside (0, 1)")
-        if memory not in ("none", "markov"):
-            raise ValueError("memory must be 'none' or 'markov'")
+        if memory not in ("none", "markov","long"):
+            raise ValueError("memory must be 'none','markov', or 'long'")
         if best_of not in (3, 5):
             raise ValueError("best_of must be 3 or 5")
 
         self.p = float(p)
-        self.k = 0.0 if memory == "none" else float(k)
         self.memory = memory
+        self._long = memory == "long" 
+        self.k = 0.0 if memory in ("none","long") else float(k)
+        self.beta = float(beta)
+        self.gamma = float(gamma)
         self.calibrate = bool(calibrate)
         self.best_of = int(best_of)
         self.sets_needed = (best_of + 1) // 2
@@ -164,11 +174,22 @@ class TennisSimulator:
         self.rng = np.random.default_rng(seed)
 
         self._L = float(logit(self.p))
-        self._c = self._solve_offset() if (self.calibrate and self.k != 0.0) else 0.0
 
-        # transition probabilities of the order-1 chain, they are conditional!
-        self._a = _sigmoid_scalar(self._L + self._c + self.k)   # P(win | won last)
-        self._b = _sigmoid_scalar(self._L + self._c - self.k)   # P(win | lost last)
+        if self._long:
+            if self.beta <= 1.0:
+                raise ValueError("beta must exceed 1, else the run mean is infinite")
+            self._gamma_a = 2.0 * self.gamma * self.p
+            self._gamma_b = 2.0 * self.gamma * (1 - self.p)
+            check_tail_params(self.beta,self._gamma_a)
+            check_tail_params(self.beta,self._gamma_b)
+            self._c = 0.0
+            self._a = self._b = None
+        else:
+            self._gamma_a = self._gamma_b = None
+            self._c = self._solve_offset() if (self.calibrate and self.k != 0.0) else 0.0
+            # transition probabilities of the order-1 chain, they are conditional!
+            self._a = _sigmoid_scalar(self._L + self._c + self.k)   # P(win | won last)
+            self._b = _sigmoid_scalar(self._L + self._c - self.k)   # P(win | lost last)
 
         # buffered uniforms - drawing them in blocks is far faster than one at a time
         self._buf: np.ndarray = np.empty(0)
@@ -208,6 +229,8 @@ class TennisSimulator:
     @property
     def stationary_p(self) -> float:
         """Long-run point-win probability actually implied by ``(p, k)``."""
+        if self._long:
+            return self.p # which is exact by construction
         return self._b / (1.0 - self._a + self._b)
 
     @property
@@ -285,6 +308,11 @@ class TennisSimulator:
     def _p_next(self, s: int) -> float:
         "The simple order-one chain will use only the sign of the streak,"
         "the long memory will use directly the magnitude."
+        if self._long:
+            m = s if s > 0 else -s
+            if s >0:
+                return 1.0 - self.beta / (m + self._gamma_a)
+            return self.beta / (m + self._gamma_b)
         if self.k == 0.0:
             return self.p
         return self._a if s > 0 else self._b
@@ -312,7 +340,7 @@ class TennisSimulator:
         paths  : (n_sequences, n_points) uint8 array, only if ``return_paths``
         """
         n_sequences, n_points = int(n_sequences), int(n_points)
-        state = (self.rng.random(n_sequences) < self.stationary_p, 1, -1)
+        state = np.where(self.rng.random(n_sequences) < self.stationary_p, 1, -1)
 
         counts = np.zeros(n_sequences, dtype=np.int64)
         paths = (
@@ -321,12 +349,22 @@ class TennisSimulator:
 
         a, b, k = self._a, self._b, self.k
         for t in range(n_points):
-            pt = self.p if k == 0.0 else np.where(state > 0, a, b)
+            if self._long:
+                mag = np.abs(state)
+                pt = np.where(
+                    state > 0,
+                    1.0 - self.beta / (mag + self._gamma_a),
+                    self.beta / (mag + self._gamma_b),
+                )
+            elif k == 0.0:
+                pt = self.p
+            else:
+                pt = np.where(state > 0, a, b)
             win = (self.rng.random(n_sequences) < pt).astype(np.int8)
             counts += win
             if return_paths:
                 paths[:, t] = win
-            state = np.where(win == 1, np.max(state,0) + 1, np.min(state,0) -1)
+            state = np.where(win == 1, np.maximum(state,0) + 1, np.minimum(state,0) -1)
 
         return (counts, paths) if return_paths else counts
 
@@ -543,7 +581,66 @@ def race_win_probability(p_unit: float, target: int, margin: int = 2) -> float:
         raise NotImplementedError("only margin=2 is implemented")
     return game_win_probability(p_unit, target=target)
 
+# --------------------------------------------------------------------------- #
+# long-memory machinery: run-length hazard and its exact survival function
+# --------------------------------------------------------------------------- #
+def check_tail_params(beta: float, gamma: float) -> None:
+    if beta <= 0.0:
+        raise ValueError("beta must be positive")
+    if gamma <= beta - 1.0:
+        raise ValueError(f"need gamma > beta - 1 (got beta={beta}, gamma={gamma}); ")
 
+def run_hazard(ell, beta: float, gamma: float = 1.0):
+    """
+    The conditional probability:
+
+    P(the current run ends on the next trial | it has reached length ``ell``).
+
+    We use ``h(l) = beta / (l + gamma)``. It should decay just slowly enough that
+    the run-length distribution has a Pareto tail ``P(L > l) ~ C l^(-beta)``, so 
+    ``beta`` is literally a tail index and can be checked against a Hill estimate.
+
+    """
+    check_tail_params(beta, gamma)
+    ell = np.asarray(ell, dtype=float)
+    return beta / (ell + gamma)
+
+def run_survival(ell, beta: float, gamma: float = 1.0):
+    """
+    Exact ``P(L > ell)`` for the hazard of :func:`run_hazard`.
+
+    The product can be expressed in term of Gamma functions:
+
+        P(L > l) = prod_{j=1..l} (1 - beta/(j+gamma))
+                 = [Gamma(l+1+gamma-beta) / Gamma(1+gamma-beta)]
+                   * [Gamma(1+gamma)      / Gamma(l+1+gamma)]
+
+    We know that Gamma(l+a)/Gamma(l+b) ~ l^(a-b), so this behaves as
+    ``C l^(-beta)`` for large ``l``. Having the survival function in closed 
+    form means the sampler can be tested exactly. Not a usual situation, but a nice one!
+    """
+    check_tail_params(beta, gamma)
+    lg = np.vectorize(math.lgamma)
+    ell = np.asarray(ell, dtype=float)
+    log_s = (
+        lg(ell + 1.0 + gamma - beta) - lg(1.0 + gamma - beta)
+        + lg(1.0 + gamma) - lg(ell + 1.0 + gamma)
+    )
+    return np.exp(log_s)
+
+def hurst_from_beta(beta: float) -> float:
+    """
+    Hurst exponent implied by a run-length tail index ``beta``.
+
+    beta > 2      : finite run variance, short memory, H = 1/2.
+    1 < beta < 2  : infinite run variance, long memory, H = (3-beta)/2 in (1/2,1).
+    beta <= 1     : infinite mean run length; no stationary law.
+    """
+    if beta <= 1.0:
+        raise ValueError("beta <= 1 gives an infinite mean run length")
+    return (3.0 - beta) / 2.0 if beta < 2.0 else 0.5
+    
+           
 if __name__ == "__main__":  # pragma: no cover
     for k in (0.0, 0.5, 1.0):
         sim = TennisSimulator(p=0.55, k=k, seed=0)
