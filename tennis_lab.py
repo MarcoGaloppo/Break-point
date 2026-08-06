@@ -124,7 +124,7 @@ class TennisSimulator:
     Notes
     -----
     The momentum state persists *across* games and sets within a match - it is a
-    property of the player, not of the game. It is reset between matches. Not p though,
+    property of the player, not of the game. It resets between matches. Not p though,
     we are not looking at players which evolve outside of the game.
     """
 
@@ -279,13 +279,15 @@ class TennisSimulator:
 
     def _draw_initial_state(self) -> int:
         if not self.stationary_start:
-            return 1 if self._u() < self.p else 0
-        return 1 if self._u() < self.stationary_p else 0
+            return 1 if self._u() < self.p else -1
+        return 1 if self._u() < self.stationary_p else -1
 
-    def _p_next(self, last: int) -> float:
+    def _p_next(self, s: int) -> float:
+        "The simple order-one chain will use only the sign of the streak,"
+        "the long memory will use directly the magnitude."
         if self.k == 0.0:
             return self.p
-        return self._a if last == 1 else self._b
+        return self._a if s > 0 else self._b
 
     # ------------------------------------------------------------------ #
     # point sequences 
@@ -297,10 +299,10 @@ class TennisSimulator:
         Simulate ``n_sequences`` independent stretches of ``n_points`` points and
         return the number of points won by A in each.
 
-        This deliberately strips the scoring hierarchy away: it is the clean
-        "sum of Bernoullis" experiment. With ``k = 0`` the returned counts are
-        exactly Binomial(n_points, p). With ``k > 0`` they are not - same mean,
-        wider distribution, heavier tails, longer runs.
+        The simple "sum of Bernoullis" experiment. With ``k = 0`` the returned 
+        counts are exactly Binomial(n_points, p). With ``k > 0`` they are not 
+        - same mean, wider distribution, heavier tails, longer runs. With long 
+        memory enabled things are even funkier than with the order-one chain.
 
         Vectorised across sequences.
 
@@ -310,7 +312,7 @@ class TennisSimulator:
         paths  : (n_sequences, n_points) uint8 array, only if ``return_paths``
         """
         n_sequences, n_points = int(n_sequences), int(n_points)
-        state = (self.rng.random(n_sequences) < self.stationary_p).astype(np.int8)
+        state = (self.rng.random(n_sequences) < self.stationary_p, 1, -1)
 
         counts = np.zeros(n_sequences, dtype=np.int64)
         paths = (
@@ -319,79 +321,75 @@ class TennisSimulator:
 
         a, b, k = self._a, self._b, self.k
         for t in range(n_points):
-            pt = self.p if k == 0.0 else np.where(state == 1, a, b)
+            pt = self.p if k == 0.0 else np.where(state > 0, a, b)
             win = (self.rng.random(n_sequences) < pt).astype(np.int8)
             counts += win
             if return_paths:
                 paths[:, t] = win
-            state = win
+            state = np.where(win == 1, np.max(state,0) + 1, np.min(state,0) -1)
 
         return (counts, paths) if return_paths else counts
 
     # ------------------------------------------------------------------ #
     # the scoring hierarchy
     # ------------------------------------------------------------------ #
-    def _play_game(self, state: int, tb: bool = False) -> Tuple[int, int, int, int, int]:
+    def _play_game(self, state: int, run:int, best_run:int, tb: bool = False) -> Tuple[int, int, int, int, int]:
         """
         Play one game (or tiebreak). Returns
         ``(winner, points_a, points_b, new_state, longest_run_a)``.
         """
         target = self.tiebreak_points if tb else self.points_to_win_game
         pa = pb = 0
-        run = best_run = 0
         while True:
             if self._u() < self._p_next(state):
                 pa += 1
-                state = 1
+                state = state + 1 if state > 0 else 1
                 run += 1
                 if run > best_run:
                     best_run = run
             else:
                 pb += 1
-                state = 0
+                state = state - 1 if state < 0 else -1
                 run = 0
             if pa >= target and pa - pb >= 2:
-                return 1, pa, pb, state, best_run
+                return 1, pa, pb, state, run, best_run
             if pb >= target and pb - pa >= 2:
-                return 0, pa, pb, state, best_run
+                return 0, pa, pb, state, run, best_run
 
-    def _play_set(self, state: int) -> Tuple[int, int, int, int, int, int, int]:
+    def _play_set(self, state: int, run: int, best_run: int ) -> Tuple[int, int, int, int, int, int, int]:
         """Returns ``(winner, games_a, games_b, points_a, points_b, state, best_run)``."""
         ga = gb = pa = pb = 0
-        best_run = 0
         G = self.games_to_win_set
         while True:
             is_tb = self.tiebreak and ga == G and gb == G
-            w, x, y, state, r = self._play_game(state, tb=is_tb)
+            w, x, y, state, run, best_run = self._play_game(state, run, best_run, tb=is_tb)
             pa += x
             pb += y
-            best_run = max(best_run, r)
             if w == 1:
                 ga += 1
             else:
                 gb += 1
             if is_tb:
-                return (1 if w == 1 else 0), ga, gb, pa, pb, state, best_run
+                return (1 if w == 1 else 0), ga, gb, pa, pb, state, run, best_run
             if ga >= G and ga - gb >= 2:
-                return 1, ga, gb, pa, pb, state, best_run
+                return 1, ga, gb, pa, pb, state, run, best_run
             if gb >= G and gb - ga >= 2:
-                return 0, ga, gb, pa, pb, state, best_run
+                return 0, ga, gb, pa, pb, state, run, best_run
 
     def simulate_match(self) -> MatchResult:
         """Play one complete match. Momentum persists across games and sets."""
         state = self._draw_initial_state()
         sa = sb = ga_tot = gb_tot = pa_tot = pb_tot = 0
-        best_run = 0
+        run = best_run = 0
         scores = []
         while sa < self.sets_needed and sb < self.sets_needed:
-            w, ga, gb, pa, pb, state, r = self._play_set(state)
+            w, ga, gb, pa, pb, state, run, best_run = self._play_set(state, run, best_run)
             sa += w
             sb += 1 - w
             ga_tot += ga
             gb_tot += gb
             pa_tot += pa
             pb_tot += pb
-            best_run = max(best_run, r)
             scores.append((ga, gb))
         return MatchResult(
             winner=1 if sa > sb else 0,
