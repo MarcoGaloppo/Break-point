@@ -1,0 +1,38 @@
+# ---- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# ---- Jupyter ---------------------------------------------------------------
+.ipynb_checkpoints/
+# Note: notebook OUTPUTS are deliberately committed so the analysis renders on
+# GitHub without being run. If diffs become unmanageable, install nbstripout.
+
+# ---- Regression / scratch artefacts ----------------------------------------
+baseline*.txt
+_pg/
+*.tmp
+
+# ---- LaTeX build artefacts -------------------------------------------------
+# theory.pdf is intentionally NOT ignored: it is the deliverable.
+*.aux
+*.fdb_latexmk
+*.fls
+*.lof
+*.log
+*.lot
+*.out
+*.synctex.gz
+*.toc
+*.bbl
+*.blg
+
+# ---- OS / editor -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
