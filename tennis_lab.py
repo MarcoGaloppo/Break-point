@@ -10,8 +10,8 @@ Here, the setting is a tennis match. At the bottom there is a Bernoulli trial:
 player A wins a point with probability ``p``. Under the textbook assumptions (i.i.d.
 points) the number of points A wins in ``n`` points is exactly Binomial(n, p),
 the CLT applies with the usual sqrt(n) scaling, and everything is comfortable. 
-However, here we break this comfort with **Absorbing barriers / nonlinear aggregation**
-and **Serial correlation ("momentum" / the hot hand)**.
+However, here we break this comfort with **Absorbing barriers / nonlinear aggregation**,
+**Serial correlation ("momentum" / the hot hand)**, and **Long-memory**.
 
 Author: Marco Galoppo
 """
@@ -36,6 +36,7 @@ __all__ = [
     "run_hazard",
     "run_survival",
     "hurst_from_beta",
+    "gamma_for_mean_run",
     "check_tail_params",
 ]
 
@@ -109,7 +110,11 @@ class TennisSimulator:
         ``k`` means winning the previous point makes you more likely to win the
         next one (hot hand); negative ``k`` means mean reversion ("they always
         drops serve right after breaking"). 
-    memory : {"none", "markov"}
+    beta : float
+           Peano exponent of the long-memory run. 
+    gamma : float
+            Convenient normalisation parameter to keep the mean fixed in the long-memory run.
+    memory : {"none", "markov","long"}
         ``"none"`` forces ``k`` to be ignored. Convenience switch so the same
         object can be flipped between regimes.
     calibrate : bool
@@ -192,6 +197,10 @@ class TennisSimulator:
             self._b = _sigmoid_scalar(self._L + self._c - self.k)   # P(win | lost last)
 
         # buffered uniforms - drawing them in blocks is far faster than one at a time
+        # when not None, every point outcome is appended here (see
+        # simulate_match_points). Costs one `is not None` test per point.
+        self._record: Optional[list] = None
+
         self._buf: np.ndarray = np.empty(0)
         self._buf_i: int = 0
         self._block: int = 65536
@@ -221,9 +230,19 @@ class TennisSimulator:
                 break
         return 0.5 * (lo + hi)
 
+    def _require_markov(self, name: str) -> None:
+        if self._long:
+            raise NotImplementedError(
+                f"{name!r} describes the order-1 chain, where rho_h = rho^h. "
+                "Under long memory rho_h ~ h^(1-beta) and sum_h rho_h diverges, "
+                "so there is no finite analogue. Use 'hurst_exponent' or "
+                "'run_tail_index'."
+            )
+
     @property
     def transition_probs(self) -> Tuple[float, float]:
         """``(a, b)`` = (P(win | won last point), P(win | lost last point))."""
+        self._require_markov("transition_probs")
         return self._a, self._b
 
     @property
@@ -236,6 +255,7 @@ class TennisSimulator:
     @property
     def rho(self) -> float:
         """Lag-1 autocorrelation of the point-outcome sequence, ``a - b``."""
+        self._require_markov("transition_probs")
         return self._a - self._b
 
     @property
@@ -246,6 +266,7 @@ class TennisSimulator:
         Equals ``(1 + rho) / (1 - rho)``. This is the number that tells you how
         badly a naive binomial standard error understates reality.
         """
+        self._require_markov("transition_probs")
         r = self.rho
         return (1.0 + r) / (1.0 - r)
 
@@ -272,10 +293,60 @@ class TennisSimulator:
         genuinely independent points a stretch of ``n`` correlated points is
         worth. At rho = 0.5, 1000 points carry the information of ~333.
         """
+        self._require_markov("transition_probs")
         return 1.0 / self.variance_inflation
+
+    @property
+    def run_tail_index(self) -> float:
+        """Pareto tail index of the run-length distribution."""
+        if not self._long:
+            raise NotImplementedError(
+                "runs are geometric in the order-1 chain - there is no power-law "
+                "tail index. Use 'rho'."
+            )
+        return self.beta
+
+    @property
+    def hurst_exponent(self) -> float:
+        """
+        Asymptotic scaling exponent of sd(S_n) ~ n**H.
+
+        Returns 0.5 for the order-1 chain.
+        """
+        if not self._long:
+            return 0.5
+        return hurst_from_beta(self.beta)
+
+    @property
+    def mean_run_lengths(self) -> Tuple[float, float]:
+        """``(E[L_A], E[L_B])``, each equal to ``gamma_i / (beta - 1)``."""
+        if not self._long:
+            raise NotImplementedError("use 'rho' for the order-1 chain")
+        d = self.beta - 1.0
+        return self._gamma_a / d, self._gamma_b / d
+
+    @property
+    def hazard_params(self) -> Tuple[float, float, float]:
+        """``(beta, gamma_A, gamma_B)`` of the long-memory run-length hazard."""
+        if not self._long:
+            raise NotImplementedError("only defined for memory='long'")
+        return self.beta, self._gamma_a, self._gamma_b
 
     def summary(self) -> Dict[str, float]:
         """Analytic characterisation of the current parameter setting."""
+        if self._long:
+            ea, eb = self.mean_run_lengths
+            return {
+                "p_target": self.p,
+                "beta": self.beta,
+                "gamma_a": self._gamma_a,
+                "gamma_b": self._gamma_b,
+                "stationary_p": self.stationary_p,
+                "E[run A]": ea,
+                "E[run B]": eb,
+                "hurst": self.hurst_exponent,
+            }
+        
         return {
             "p_target": self.p,
             "k": self.k,
@@ -371,15 +442,27 @@ class TennisSimulator:
     # ------------------------------------------------------------------ #
     # the scoring hierarchy
     # ------------------------------------------------------------------ #
-    def _play_game(self, state: int, run:int, best_run:int, tb: bool = False) -> Tuple[int, int, int, int, int]:
+    def _play_game(
+        self, state: int, run: int, best_run: int, tb: bool = False
+    ) -> Tuple[int, int, int, int, int, int]:
         """
         Play one game (or tiebreak). Returns
-        ``(winner, points_a, points_b, new_state, longest_run_a)``.
+        ``(winner, points_a, points_b, new_state, run, best_run)``.
+
+        ``run`` is threaded in and out rather than reset locally: a streak does
+        not care where the scoreboard happens to reset.
+
+        This is also the only place in the module where a point is decided, so
+        it is the single hook for :meth:`simulate_match_points`.
         """
         target = self.tiebreak_points if tb else self.points_to_win_game
         pa = pb = 0
+        rec = self._record          # hoisted: avoids an attribute lookup per point
         while True:
-            if self._u() < self._p_next(state):
+            won = self._u() < self._p_next(state)
+            if rec is not None:
+                rec.append(won)
+            if won:
                 pa += 1
                 state = state + 1 if state > 0 else 1
                 run += 1
@@ -440,6 +523,18 @@ class TennisSimulator:
             longest_run_a=best_run,
             set_scores=scores,
         )
+
+    def simulate_match_points(self, n_matches: int) -> list:
+        """
+        Point-by-point 0/1 outcomes for each match, as a ragged list of arrays.
+        """
+        out = []
+        for _ in range(int(n_matches)):
+            self._record = []
+            self.simulate_match()
+            out.append(np.asarray(self._record, dtype=np.uint8))
+        self._record = None
+        return out
 
     def simulate_matches(self, n_matches: int, as_dict: bool = True):
         """
@@ -557,8 +652,7 @@ def match_win_probability_iid(
     """
     Exact P(player A wins the match) with i.i.d. Bernoulli(p) points.
 
-    This is the function ``f(p)`` used throughout the fragility analysis. It is
-    an extremely steep S-curve: the whole point of the exercise is that a
+    It is an extremely steep S-curve: the whole point of the exercise is that a
     quantity you can only estimate to within a few points of a percent gets
     pushed through ``f`` before it means anything.
     """
@@ -639,8 +733,25 @@ def hurst_from_beta(beta: float) -> float:
     if beta <= 1.0:
         raise ValueError("beta <= 1 gives an infinite mean run length")
     return (3.0 - beta) / 2.0 if beta < 2.0 else 0.5
-    
-           
+
+
+def gamma_for_mean_run(mean_run_a: float, beta: float, p: float) -> float:
+    """
+    Scale ``gamma`` giving player A a target mean run length at a given ``beta``.
+
+    Since ``E[L_A] = gamma_A / (beta - 1)`` and ``gamma_A = 2 * gamma * p``,
+
+        gamma = mean_run_a * (beta - 1) / (2p)
+    """
+    if beta <= 1.0:
+        raise ValueError("beta must exceed 1 for a finite mean run length")
+    if mean_run_a <= 1.0:
+        raise ValueError("mean run length must exceed 1")
+    if not 0.0 < p < 1.0:
+        raise ValueError("p must lie strictly inside (0, 1)")
+    return mean_run_a * (beta - 1.0) / (2.0 * p)
+
+
 if __name__ == "__main__":  # pragma: no cover
     for k in (0.0, 0.5, 1.0):
         sim = TennisSimulator(p=0.55, k=k, seed=0)

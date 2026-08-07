@@ -15,6 +15,7 @@ env/
 # ---- Regression / scratch artefacts ----------------------------------------
 baseline*.txt
 _pg/
+_t/
 *.tmp
 
 # ---- LaTeX build artefacts -------------------------------------------------
