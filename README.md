@@ -1,7 +1,7 @@
 # Statistics in human affairs — a tennis laboratory
 
 How much do textbook statistics comfortable machinery survives contact with a
-process that has **absorbing barriers**, **serial correlation**, and **parameter uncertainty**? 
+process that has **absorbing barriers**, **serial correlation**, and **long memory**? 
 Tennis is a clean (and fun!) place to ask, because the bottom of the process really is a
 Bernoulli trial. Additionally, everything above it is bookkeeping that we control exactly. 
 Although finance is messy sometimes is good to start with a ground truth and build up 
@@ -42,22 +42,34 @@ however, things can change drastically.
 
 ## Headline results
 
-1. An order-1 chain (short-term memory), effectively generates excess kurtosis which still decays 
-to zero. Correlation of this kind does not buy you fat tails — it buys you **overconfidence**. And 
+1. **A hot-hand makes us over-confident**
+An order-1 chain (short-term memory), effectively generates excess kurtosis which still decays 
+to zero. Correlation of this kind does not buy fat tails; it buys only **overconfidence**. And 
 this is a problem. Because, then, every normality test on correctly-standardised residuals will pass 
 while your error bars stay too small with respect to the actual scenaro you would like to describe. 
 There is more volatility in the system, even in this case. Quite fun!
 
-2. Momentum is a variance pump, and in a barrier-crossing game variance is worth something to whoever is behind. 
+2. **Momentum is a variance pump, and in a barrier-crossing game variance is worth something to whoever is behind.** 
 We have an asymettric situation in which the (relatively) close-to-win-but-still-losing player benefits more from luck (i.e., more things can go better than worse for them) than the close-to-losing-but-still-winning player (which has a more capped ceiling on good luck than bad luck). At p = 0.55 held fixed, the favourite's match-win probability falls from 91% to 77% as k goes from 0 to 1. **A model fitted on point-level data and aggregated under independence systematically overprices favourites.** If a player is a (slight) underdog, volatility will benefit them more!
 
-3. **The absorbing barriers kill the long-memory in tennis.** We consider the underlying 
-chosen models within the constraint of *real matches*. As such, a match starts at the first point 
+3. **The absorbing barriers kill the long-memory in tennis.** 
+We consider the underlying chosen models within the constraint of *real matches*. As such, a match starts at the first point 
 and ends when someone has won two sets. The longest run physically possible in a best-of-3 is **53** points. 
 We found that by keeping the mean run length fixed at 4.0 and sweeping β from 3.5 down to 1.3 — i.e., from finite
 to infinite variance — the longest run ever observed is **52 or 53 every single time**. In other words: the
 extreme is pinned to the format, not to the underlying process. In fact, the clipped runs would be those that carry
 *all* of the variance for β < 2.0. As such we discovered the simple fact that **a truncated power law is not a power law**. 
+
+4. **Estimating point and match win probabilities are not the same thing.**
+The mapping from the probability of winning a point to winning a match is strikinlgy nonlinear. A player that wins 51% of the points wins about 60.6% of the best-of-3 matches. With 55% points won, this translates to over 90% of the best-of-3 matches. The absorbing barriers are clearly carrying this nonlinear mapping. The nonlinearity 
+carries over fragility to the estimation of the win-point probability. As a consequence, even if the probability of winning a single point can be estimated
+reasonably well with a single game, this translate in completely uninformative posteriors on winning the match.
+
+5. **Detecting long memory is easy; measuring its consequences is impossible.** Given a single match, can we detect long memory? And if so
+can say anything about the Pareto exponent? Well, it turns out that detection is startlingly easy, with essentially 100% detection rates from two matches and 80% 
+with a single one, at a 0–1% false-positive rate. This is because the discrimination power between short and long memory is carried by the **body** 
+of the run-length distribution (e.g., runs of 5–20 points, which fit comfortably inside a match) rather than by the tail the barrier destroyed. However, **the barrier annihilates the predictive power on the Pareto exponent**. Indeed, the 95% interval on β from one match is `[1.1, 5.9]`, and it takes
+about twenty-five matches merely to place β on one side of the phase boundary at 2. 
 
 ## Files
 
@@ -102,11 +114,4 @@ No `scipy` — the binomial pmf and the normal quantile function are implemented
 ```
 pip install -r requirements.txt
 ```
-
-## Where this goes next
-
-- **Inference, not simulation** — given one observed match, what is the posterior over
-  `(p, k)`? Or, sharper still after Part 7: fit a Hill estimator to run lengths from simulated
-  matches and watch it report a tail index on the wrong side of β = 2, confidently and with
-  tight standard errors, for a process built with infinite variance.
 

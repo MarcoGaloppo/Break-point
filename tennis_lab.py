@@ -37,6 +37,11 @@ __all__ = [
     "run_survival",
     "hurst_from_beta",
     "gamma_for_mean_run",
+    "calibrated_transitions",
+    "markov_stats",
+    "loglik_markov",
+    "run_stats",
+    "loglik_long_grid",
     "check_tail_params",
 ]
 
@@ -97,7 +102,8 @@ class MatchResult:
 # --------------------------------------------------------------------------- #
 class TennisSimulator:
     """
-    Simulate tennis at the point level, with optional order-1 serial correlation.
+    Simulate tennis at the point level, with optional order-1 serial correlation,
+    as well as Pareto-like long-memory.
 
     Parameters
     ----------
@@ -750,6 +756,131 @@ def gamma_for_mean_run(mean_run_a: float, beta: float, p: float) -> float:
     if not 0.0 < p < 1.0:
         raise ValueError("p must lie strictly inside (0, 1)")
     return mean_run_a * (beta - 1.0) / (2.0 * p)
+
+
+# --------------------------------------------------------------------------- #
+# Inference: likelihoods for the inverse problem
+#
+#
+# All log-likelihoods below are **conditional on the first point of each match**,
+# so that they are likelihoods of exactly the same data and may be compared
+# directly. 
+# --------------------------------------------------------------------------- #
+def calibrated_transitions(p: float, k: float) -> Tuple[float, float]:
+    """``(a, b)`` for the order-1 chain whose stationary win probability is p."""
+    if k == 0.0:
+        return p, p
+    L = math.log(p / (1.0 - p))
+
+    def stat(c):
+        a = _sigmoid_scalar(L + c + k)
+        b = _sigmoid_scalar(L + c - k)
+        return b / (1.0 - a + b)
+
+    lo, hi = -40.0, 40.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if stat(mid) < p:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-13:
+            break
+    c = 0.5 * (lo + hi)
+    return _sigmoid_scalar(L + c + k), _sigmoid_scalar(L + c - k)
+
+
+def markov_stats(paths) -> Tuple[int, int, int, int]:
+    """Pooled transition counts ``(n11, n10, n01, n00)`` over a list of paths."""
+    n11 = n10 = n01 = n00 = 0
+    for x in paths:
+        x = np.asarray(x, dtype=np.int8)
+        if x.size < 2:
+            continue
+        prev, nxt = x[:-1], x[1:]
+        n11 += int(np.sum((prev == 1) & (nxt == 1)))
+        n10 += int(np.sum((prev == 1) & (nxt == 0)))
+        n01 += int(np.sum((prev == 0) & (nxt == 1)))
+        n00 += int(np.sum((prev == 0) & (nxt == 0)))
+    return n11, n10, n01, n00
+
+
+def loglik_markov(stats, p: float, k: float) -> float:
+    """Conditional log-likelihood of the order-1 chain given the transition counts."""
+    n11, n10, n01, n00 = stats
+    a, b = calibrated_transitions(p, k)
+    eps = 1e-300
+    return (n11 * math.log(a + eps) + n10 * math.log1p(-a)
+            + n01 * math.log(b + eps) + n00 * math.log1p(-b))
+
+
+def run_stats(paths, max_len: int = 120):
+    """
+    Run-length counts, split by player and by censoring.
+
+    Returns ``(a_done, b_done, a_cens, b_cens)``, integer arrays indexed by
+    length. The final run of each match is **right-censored** - the match
+    stopped, the run did not end - so it contributes ``P(L >= l)`` rather than
+    ``P(L = l)``. Ignoring that would bias every run-length estimate downward.
+    """
+    out = [np.zeros(max_len + 2, dtype=np.int64) for _ in range(4)]
+    a_done, b_done, a_cens, b_cens = out
+    for x in paths:
+        x = np.asarray(x, dtype=np.int8)
+        if x.size == 0:
+            continue
+        change = np.flatnonzero(np.diff(x)) + 1
+        starts = np.concatenate(([0], change))
+        lens = np.minimum(np.concatenate((change, [x.size])) - starts, max_len)
+        who = x[starts]
+        for i in range(len(lens)):
+            last = i == len(lens) - 1
+            if who[i] == 1:
+                (a_cens if last else a_done)[lens[i]] += 1
+            else:
+                (b_cens if last else b_done)[lens[i]] += 1
+    return tuple(out)
+
+
+def loglik_long_grid(stats, ps, ms, bs) -> np.ndarray:
+    """
+    Conditional log-likelihood of the hazard model over a ``(p, mean_run, beta)``
+    grid, vectorised. Returns an array of shape ``(len(ps), len(ms), len(bs))``.
+
+    Exploits the fact that ``gamma_A = mean_run * (beta - 1)`` does not depend on
+    ``p``, so the A-side survival tables are built once per ``(mean_run, beta)``.
+    Large ``beta`` is the order-1 limit, so a grid reaching high ``beta`` (or a
+    grid in ``1/beta`` including zero) is what makes the nested test possible.
+    """
+    a_done, b_done, a_cens, b_cens = stats
+    L = len(a_done) - 2
+    ell = np.arange(0, L + 2)
+    j = np.arange(1, L + 2, dtype=float)
+
+    P = np.asarray(ps, float)[:, None, None]
+    M = np.asarray(ms, float)[None, :, None]
+    B = np.asarray(bs, float)[None, None, :]
+    GA = np.broadcast_to(M * (B - 1.0), (len(ps), len(ms), len(bs)))
+    GB = GA * (1.0 - P) / P
+
+    out = np.zeros(GA.shape)
+    for G, done, cens in ((GA, a_done, a_cens), (GB, b_done, b_cens)):
+        g = np.ascontiguousarray(G).ravel()[:, None]
+        b = np.broadcast_to(B, G.shape).ravel()[:, None]
+        bad = g[:, 0] <= b[:, 0] - 1.0
+        logS = np.concatenate(
+            [np.zeros((len(g), 1)), np.cumsum(np.log1p(-b / (j[None, :] + g)), axis=1)],
+            axis=1,
+        )
+        log_h = np.log(b / (ell[None, :] + g))
+        idx = np.flatnonzero(done > 0)
+        contrib = logS[:, idx - 1] @ done[idx] + log_h[:, idx] @ done[idx]
+        idc = np.flatnonzero(cens > 0)
+        if idc.size:
+            contrib = contrib + logS[:, idc - 1] @ cens[idc]
+        contrib[bad] = -np.inf
+        out += contrib.reshape(G.shape)
+    return out
 
 
 if __name__ == "__main__":  # pragma: no cover
